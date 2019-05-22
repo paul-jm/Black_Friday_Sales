@@ -1,0 +1,725 @@
+---
+title: "Paul_Jacques-Mignault_Individual_Black_Friday"
+author: "Paul Jacques-Mignault"
+date: '2019-05-20'
+output: html_document
+---
+
+```{r setup, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(devtools)
+
+source_url('https://raw.githubusercontent.com/paul-jm/House_Prices/master/load_libraries_ml.R')
+source_url('https://raw.githubusercontent.com/paul-jm/House_Prices/master/f_partition_sirio.R')
+source_url('https://raw.githubusercontent.com/paul-jm/House_Prices/master/regression_metrics.R')
+
+www <- 'https://raw.githubusercontent.com/paul-jm/House_Prices/master/house_price_train.csv'
+train_df <- read.csv(www, header = TRUE, sep=",") 
+
+www <- 'https://raw.githubusercontent.com/paul-jm/House_Prices/master/house_price_test.csv'
+test_df <- read.csv(www, header = TRUE, sep=",") 
+
+head(train_df)
+dim(train_df)
+str(train_df)
+
+head(test_df)
+dim(test_df)
+
+test_df_ids <- test_df$id # Keep the id's in a separate vector
+train_df$id <- NULL
+test_df$id <- NULL
+
+```
+
+## Exploratory Data Analysis
+
+...
+
+```{r custom_functions, echo=FALSE}
+
+get_num_columns <- function(df) {
+  int_cols <- names(df[sapply(df, is.integer)])
+  num_cols <- setdiff(names(df[sapply(df, is.numeric)]),
+                      names(df[sapply(df, is.integer)]))
+  df <- df[ , num_cols]
+}
+
+fix_dates <- function(df) {
+  df[ , 'date'] <- as.Date(df[ , 'date'],format = "%m/%d/%Y")
+  df %>%
+    separate(date, sep="-", into = c("year", "month", "day"))
+}
+
+fix_factors <- function(df, lst) {  
+  df[, lst] <- data.frame(apply(df[, lst],2, as.factor))
+}
+
+fix_int <- function(df, lst) {
+  integers_col <- names(df[sapply(df, is.integer)])
+  factor_list <- setdiff(integers_col, lst)
+  df[ , factor_list] <-
+      lapply(df[ , factor_list], as.numeric)
+}
+
+fix_skew <- function(df, lst) {
+  numericVarNames <- names(which(sapply(df, is.numeric)))
+  numericVarNames <- numericVarNames[!numericVarNames %in% lst]
+  
+  df_numeric <- df[, names(df) %in% numericVarNames]
+  for(i in 1:ncol(df_numeric)){
+          if (abs(skew(df_numeric[ ,i]))>0.8){
+                  df_numeric[,i] <- log(df_numeric[,i] +1)
+    }
+  }
+  return(df_numeric)
+}  
+
+fix_scale <- function(df, lst){
+  df_numeric <- fix_skew(df, lst)  
+    for(i in 1:ncol(df_numeric)){
+      df_numeric[,i] <- scale(df_numeric[,i],center= TRUE, scale=TRUE)
+    }
+  return(df_numeric)
+}
+
+dummy_encode <- function(df) {
+  
+  df_factors <- data.frame(df[sapply(df, is.factor)])
+  df_factors_encode <- caret::dummyVars(" ~ .", data = df_factors, fullRank=T,sep = "_")
+  df_factors_encode <- data.table(predict(df_factors_encode, newdata = df_factors))
+  names(df_factors_encode)<-gsub('-','_',names(df_factors_encode))
+  return(df_factors_encode)
+  
+}
+
+eval_against_baseline <- function(df, formula, target_variable) {
+  whole_data <- f_partition(df,
+                          test_proportion = 0.2,
+                          seed = 1)
+  
+  formula<-as.formula(target_variable~.)   # price against all other variables
+  
+  lm_0 <- lm(formula = formula,
+                   data=whole_data$train)
+  
+  test_lm<-predict(lm_0, newdata = whole_data$test)
+  
+  mape_lm<-mape(real= exp(whole_data$test$target_variable), predicted = exp(test_lm))
+  mape_lm
+}
+
+fix_extraneous_variables <- function(df) {
+  df$view <- as.numeric(df$view)
+  df$condition <- as.numeric(df$condition)
+  df$grade <- as.numeric(df$grade)
+  
+  df$view[df$view == 0 ] <- 0
+  df$view[df$view == 1 | df$view == 2 ] <- 1
+  df$view[df$view == 3 | df$view == 4 ] <- 2
+  
+  df$condition[df$condition == 0 | df$condition == 1 | df$condition == 2 ] <- 0
+  df$condition[df$condition == 3] <- 1
+  df$condition[df$condition == 4 | df$condition == 5] <- 2
+
+  df$grade[df$grade <= 8] <- 0
+  df$grade[df$grade == 9] <- 1
+  df$grade[df$grade == 10 | df$grade == 11] <- 2
+  df$grade[df$grade == 12 | df$grade == 13] <- 3
+  
+  df$view <- as.factor(df$view)
+  df$condition <- as.factor(df$condition)
+  df$grade <- as.factor(df$grade)
+  
+  return(df)
+}
+
+house_age_variable <- function(df) {
+  train_df_age <- df
+  train_df_age$year <- as.numeric(train_df_age$year)
+  train_df_age$house_age <- train_df_age$year - train_df_age$yr_built
+  
+  train_df_age$new_house[train_df_age$house_age <= 5] <- 1
+  train_df_age$new_house[train_df_age$house_age > 5] <- 0
+  train_df_age$new_house <- as.factor(train_df_age$new_house)
+  return(train_df_age)
+}
+
+reno_variable <- function(df) {
+  train_df_reno <- train_df
+  train_df_reno$year <- as.numeric(train_df_reno$year)
+  train_df_reno$reno_age <- train_df_reno$year - train_df_reno$yr_renovated
+  
+  train_df_reno$reno_age[train_df_reno$reno_age <= 5] <- 1
+  train_df_reno$reno_age[train_df_reno$reno_age > 5] <- 0
+  train_df_reno$reno_age <- as.factor(train_df_reno$reno_age)
+  return(train_df_reno)
+}
+
+basement_var <- function(df) {
+  train_df_space <- df
+  train_df_space$sqft_basement[train_df_space$sqft_basement > 0] <- 1
+  train_df_space$sqft_basement <- as.factor(train_df_space$sqft_basement)
+  return(train_df_space)
+}
+
+neighbour_var <- function(df) {
+  train_df_neighbour <- df
+  train_df_neighbour$neighbour <- train_df_neighbour$sqft_living / train_df_neighbour$sqft_living15
+  train_df_neighbour$neighbour <- as.numeric(train_df_neighbour$neighbour)
+  return(train_df_neighbour)
+}
+
+run_part_tree <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    tree_0<-rpart(formula = formula, data = whole_data$train, method = 'anova', model=TRUE)
+    test_tree<-predict(tree_0, newdata = whole_data$test,type = 'vector') 
+    mape_tree<-mape(real=exp(whole_data$test$target_variable), predicted = exp(test_tree))
+    result_lst[i] <- mape_tree
+  } 
+  return(result_lst)
+}
+
+run_rf <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    rf_1 <- ranger(formula, whole_data$train)
+    test_rf1 <- predict(rf_1,whole_data$test)$predictions
+    mape_rf <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_rf1))
+    result_lst[i] <- mape_rf
+  } 
+  return(result_lst)
+}
+
+run_bt <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    
+    xgb_0<-xgboost(booster='gbtree', 
+               data = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))),
+               label = whole_data$train$target_variable, 
+               nrounds = 200,
+               objective='reg:linear')
+    
+    test_xgb<-predict(xgb_0, newdata = data.matrix(dplyr::select(whole_data$test, 
+                                                               -c('target_variable'))), type='response')
+    mape_bt <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_xgb))
+    result_lst[i] <- mape_bt
+  } 
+  return(result_lst)
+}
+
+run_swr <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    
+    lm_0 <- stepAIC(lm(formula = formula, # You want AIC to be as low as possible
+                 data=whole_data$train),
+              trace=F)
+    
+    test_lm <- predict(lm_0, newdata = whole_data$test)
+    mape_swr <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_lm))
+    result_lst[i] <- mape_swr
+  } 
+  return(result_lst)
+}
+
+run_reg <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    
+    glmnet_cv<-cv.glmnet(x = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))),
+                     nfolds = 5,
+                     y = whole_data$train[['target_variable']],
+                     alpha=1, # Everything between 0 and 1 is an elastic net
+                     family = 'gaussian',
+                     standardize = T)
+    
+    glmnet_0<-glmnet(x = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))), 
+                 y = whole_data$train[['target_variable']],
+                 family = 'gaussian',
+                 alpha=1, lambda = glmnet_cv$lambda.min)
+    
+    test_glmnet<-predict(glmnet_0, newx = data.matrix(dplyr::select(whole_data$test, -c('target_variable'))))    
+    mape_reg <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_glmnet))
+    result_lst[i] <- mape_reg
+  } 
+  return(result_lst)
+}
+
+run_xgbr <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    
+    xgb_reg_0<-xgboost(booster='gblinear', 
+               data = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))),
+               label = whole_data$train$target_variable, 
+               nrounds = 250,
+               objective='reg:linear')
+    
+    test_xgbr <- predict(xgb_reg_0, newdata = data.matrix(dplyr::select(whole_data$test, 
+                                                               -c('target_variable'))), type='response')
+    mape_xgbr <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_xgbr))
+    result_lst[i] <- mape_xgbr
+  } 
+  return(result_lst)
+}
+
+```
+
+## Data Preparation
+
+...
+
+```{r fix_data_types, echo=FALSE}
+
+# Changing variable types where appropriate
+
+factor_variables <- c('waterfront', 'view', 'condition', 'grade', 'zipcode')
+
+train_df <- cbind(get_num_columns(train_df),
+                  fix_dates(train_df)[ ,c('year', 'month', 'day')],
+                  fix_factors(train_df, factor_variables), 
+                  fix_int(train_df, factor_variables))
+
+
+str(train_df)
+
+sum(is.na(train_df$price)) # Just making sure
+
+```
+
+## Exploratory Data Analysis
+
+Location, location, location!
+
+```{r eda, echo=FALSE}
+
+summary(train_df$price)
+
+price_hist <- ggplot(data = train_df, aes(x=price)) +
+        geom_histogram(fill="pink", binwidth = 50000) # Pink just cause
+        scale_x_continuous(breaks= seq(0, 8000000, by=1000000), labels = comma) 
+        
+price_hist <- price_hist + theme_tufte() + ggtitle('House Price Histogram')
+
+price_hist
+
+for (i in factor_variables[factor_variables!='zipcode'])
+    { variable_plot <- (ggplot(data = train_df, aes(x=as.factor(train_df[ ,i]), y=price))+
+            geom_boxplot(col='pink') + labs(x = i) +
+            scale_y_continuous(breaks= seq(0, 8000000, by=1000000), labels = comma)
+            + theme_tufte() + ggtitle(paste0(i,' vs House Price')))
+    print(variable_plot)
+  }
+
+for (i in factor_variables[factor_variables!='zipcode'])
+  { variable_plot <- (ggplot(data = train_df, aes(x=as.factor(train_df[ ,i]))) +
+        geom_density(stat='count', colour="pink") + labs(x = i)
+          + theme_tufte() + ggtitle(paste0(i,' Density Graph')))
+    print(variable_plot)
+  }
+
+num_var <- train_df[, names(train_df[sapply(train_df, is.numeric)])]
+cor_num_var <- cor(num_var, use="pairwise.complete.obs") #correlations of all numeric variables
+
+#sort on decreasing correlations with house price
+cor_sorted <- as.matrix(sort(cor_num_var[,'price'], decreasing = TRUE))
+ #select correlations stronger than 0.5
+CorHigh <- names(which(apply(cor_sorted, 1, function(x) abs(x)>0.2)))
+cor_num_var <- cor_num_var[CorHigh, CorHigh]
+corrplot.mixed(cor_num_var, tl.col="black", tl.pos = "lt", mar=c(2,2,2,2)) + theme_tufte()
+
+# The variable with the highest correlation to the house price is 'sqft_living'.
+# Let's have a closer look at this variable with 0.7 r2 correlation with the target.
+
+sqft_living_viz <- ggplot(data = train_df, aes( x = sqft_living, y = price))+
+        geom_point(col='pink') + geom_smooth(method = "lm", se=FALSE, color="brown", aes(group=1)) +
+        scale_y_continuous(breaks= seq(0, 8000000, by=1000000), labels = comma)
+
+sqft_living_viz <- sqft_living_viz + theme_tufte() + ggtitle('Living Space vs. House Price')
+
+sqft_living_viz
+
+yearly_sales <- ggplot(data = train_df, aes(x=as.factor(year), y=price)) +
+        geom_bar(stat='summary', fun.y = "median", fill='pink')+
+        scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = comma) +
+        geom_label(stat = "count", aes(label = ..count.., y = ..count..), size = 3) +
+        coord_cartesian(ylim = c(0, 500000)) + theme_tufte()
+
+monthly_sales <- ggplot(data = train_df, aes(x=as.factor(month), y=price)) +
+        geom_bar(stat='summary', fun.y = "median", fill='pink')+
+        scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = comma) +
+        geom_label(stat = "count", aes(label = ..count.., y = ..count..), size = 3) +
+        coord_cartesian(ylim = c(0, 500000)) + theme_tufte()
+
+grid.arrange(monthly_sales, yearly_sales, widths=c(2,1), top = "Sales Historical Time Series")
+
+#Creates map in order to better understand Seattle's real estate market
+
+map_train_df <- train_df[ ,c('long','lat','price')]
+map_train_df$decile <- ntile(map_train_df$price, 10)
+beatCol <- colorFactor(palette = 'RdYlGn', map_train_df$decile)
+
+create_map <- function(dataset){
+  
+  #Print map
+  my_map <- leaflet(data.frame(dataset)) %>%
+    addTiles() %>%  # Add default OpenStreetMap map tiles
+    addCircleMarkers(lng=~long, lat=~lat,
+                     color = ~beatCol(decile), 
+                     popup = map_train_df$price,
+                     radius = 0.3) %>% 
+    addLegend("bottomright", pal = beatCol, values = map_train_df$decile, 
+              title = 'Real Estates Price <br>Deciles (1 = 10% <br> Cheapest, 10 = 10% <br> most Expensive)',                 opacity = 1)
+  
+  return(my_map)
+}
+
+create_map(map_train_df)
+
+```
+
+## Data Preparation
+
+...
+
+```{r data_prep_baseline, echo=FALSE}
+
+train_df$waterfront <- NULL # Can't train on 1% of data!
+train_df$day <- NULL
+target_variable <- log(train_df$price)
+train_df$price <- NULL
+
+ordinal_variables <- c('bathrooms','floors','lat','long',
+                      'bedrooms','yr_built','yr_renovated',
+                      'year','month')
+
+df_prep <- cbind(fix_scale(train_df, ordinal_variables),
+                 dummy_encode(train_df),
+                 train_df[ ,ordinal_variables],
+                 target_variable)
+
+# Establish a plain linear regression baseline
+eval_against_baseline(df_prep, formula = formula, target_variable = target_variable)
+# Not too bad for a first trial!
+ 
+```
+
+## Feature Engineering
+
+...
+
+```{r feature_eng, echo=FALSE}
+
+# First step: Regroup extraneous variables where needed
+train_df_group <- fix_extraneous_variables(train_df)
+str(train_df_group)
+
+factor_variables<-names(train_df_group)[sapply(train_df_group, is.factor)]
+count_factor_variables<-sapply(train_df_group[,factor_variables], summary)
+
+df_prep_F1 <- cbind(fix_scale(train_df_group, ordinal_variables),
+                 dummy_encode(train_df_group),
+                 train_df_group[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F1, formula = formula, target_variable = target_variable)
+# Slightly worse than baseline; we will discard this effort. 
+
+# Second step: Get rid of the zipcode and replace with a cluster variable, 
+# which will indicate if the listing is in an expensive or affordable neighbourhood. 
+
+train_df_geo <- train_df[ ,c('long','lat')]
+
+k.max <- 10 
+within_sum_squares <- sapply(2:k.max, 
+              function(k) {kmeans (train_df_geo, 
+                                   k, nstart=50,iter.max = 15 )$tot.withinss}) 
+
+within_sum_squares # View results
+
+plot(2:k.max, within_sum_squares, 
+     type="b", pch = 15, frame = FALSE, 
+     xlab="Number of clusters K", 
+     ylab="Total within-clusters sum of squares") 
+     abline(v = 4, lty =2) + theme_tufte() 
+
+set.seed(1)
+kmeans_model <- kmeans(train_df_geo, centers = 10, nstart = 25)
+
+train_df_FE2 <- train_df
+train_df_FE2$location <- as.factor(kmeans_model$cluster)
+train_df_FE2$zipcode <- NULL
+
+df_prep_F2 <- cbind(fix_scale(train_df_FE2, ordinal_variables),
+                 dummy_encode(train_df_FE2),
+                 train_df_FE2[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F2, formula = formula, target_variable = target_variable)
+# And it's getting worse, even with 10 location clusters, which would
+# here be clustering 10 neighbourhoods by proximity... :s
+
+# Third Step: Create a new feature for house age in years. 
+
+train_df_age <- house_age_variable(train_df)
+
+# This is a numeric feature, which will have to be scaled and fixed for skewness. 
+
+df_prep_F3 <- cbind(fix_scale(train_df_age, ordinal_variables),
+                 dummy_encode(train_df_age),
+                 train_df_age[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F3, formula = formula, target_variable = target_variable)
+# Slight improvement!
+# The improvement is hardly significant, though. 
+
+# Fourth step: 
+
+train_df_reno <- reno_variable(train_df)
+
+df_prep_F4 <- cbind(fix_scale(train_df_reno, ordinal_variables),
+                 dummy_encode(train_df_reno),
+                 train_df_reno[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F4, formula = formula, target_variable = target_variable)
+# Slightly worse, not significantly.
+
+# Fifth step: Working with our basement space 
+
+train_df_space <- basement_var(train_df)
+
+df_prep_F5 <- cbind(fix_scale(train_df_space, ordinal_variables),
+                 dummy_encode(train_df_space),
+                 train_df_space[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F5, formula = formula, target_variable = target_variable)
+# Slightly worse, again not significantly. 
+
+# Sixth step: Compare the house's living space to the rest of the neighbourhood.
+
+train_df_neighbour <- neighbour_var(train_df)
+
+df_prep_F6 <- cbind(fix_scale(train_df_neighbour, ordinal_variables),
+                 dummy_encode(train_df_neighbour),
+                 train_df_neighbour[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F6, formula = formula, target_variable = target_variable)
+# Slightly better, will keep this feature for further steps.
+
+# Feature Selection
+# Starting with df_prep
+
+whole_data <- f_partition(df_prep,
+                              test_proportion = 0.2,
+                              seed = 1)
+
+ctrl <- rfeControl(functions = caretFuncs,
+                   method = "repeatedcv",
+                   repeats = 1,
+                   verbose = FALSE)
+
+subsets <- c(25, 50, 75, 100)
+
+# caretProfile <- rfe(x = as.data.frame(dplyr::select(whole_data$train, -c('target_variable'))), 
+#                  y = whole_data$train$target_variable,
+#                  sizes = subsets,
+#                  rfeControl = ctrl)
+
+# caretProfile
+# Computationally expensive, marginal benefits involved; 0.1364 for 
+
+```
+
+## Data Preparation
+
+boost_tree     0.1210463
+
+```{r model_selection, echo=FALSE}
+
+df_prep_list <- list(df_prep, df_prep_F1, df_prep_F2, df_prep_F3,
+                     df_prep_F4, df_prep_F5, df_prep_F6)
+# Partitioning Tree
+
+# Random Forest
+
+# Boosting Tree
+
+# Regression with StepWise feature selection 
+
+# Regression with regularization 
+
+# Boosting Regression
+
+# Results Table
+
+set.seed(1)
+
+results_table <- rbind(run_part_tree(df_prep_list),
+                 run_rf(df_prep_list),
+                 run_bt(df_prep_list),
+                 run_swr(df_prep_list),
+                 run_reg(df_prep_list),
+                 run_xgbr(df_prep_list)
+)
+
+colnames(results_table) <- c('df_prep', 'df_prep_F1', 'df_prep_F2', 'df_prep_F3',
+                     'df_prep_F4', 'df_prep_F5', 'df_prep_F6')
+
+rownames(results_table) <- c('partition_tree','rand_for','boost_tree',
+                          'sw_reg','reg_reg', 'boost_reg')
+
+results_table
+
+# Compared to baselin of 0.136493, we have improved :)
+
+```
+
+# Cross-Validation
+
+...
+
+```{r cross_validation, echo = FALSE}
+
+set.seed(1)
+
+whole_data<-f_partition(df_prep,
+                        test_proportion = 0.2,
+                        seed = 1)
+
+params <- list(
+  booster = "gbtree", 
+  objective = "reg:linear"
+  )
+
+cv <- xgb.cv(params = params,
+             data = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))), 
+             label = exp(whole_data$train$target_variable),
+             nrounds = 200, 
+             nfold = 10, 
+             metrics = list("mae"))
+
+cv_data <- as.data.frame(cv$evaluation_log)[ , c('iter','train_mae_mean', 'test_mae_mean')]
+
+cv_data_plot <- melt(cv_data, id = 'iter')
+
+cv_plot <- ggplot(data=cv_data_plot, aes(x=iter, y=value, group=variable)) +
+            geom_line(aes(color=variable)) +
+            scale_y_continuous(limits = c(0, 400000),
+              breaks= seq(0, 400000, by=100000), labels = comma) + 
+            theme_tufte() +
+            ggtitle('MAE for Cross-Validation Results with 10 folds') +
+            labs(x = "Number of Iterations", y = 'MAE', color = 'Dataset')
+
+cv_plot
+
+```
+
+# Model Deployment
+
+...
+
+```{r deployment, echo = FALSE}
+
+test_df
+
+factor_variables <- c('waterfront', 'view', 'condition', 'grade', 'zipcode')
+
+test_df <- cbind(get_num_columns(test_df),
+                  fix_dates(test_df)[ ,c('year', 'month', 'day')],
+                  fix_factors(test_df, factor_variables), 
+                  fix_int(test_df, factor_variables))
+
+str(test_df)
+
+test_df$waterfront <- NULL # Can't train on 1% of data!
+test_df$day <- NULL
+
+ordinal_variables <- c('bathrooms','floors','lat','long',
+                      'bedrooms','yr_built','yr_renovated',
+                      'year','month')
+
+df_prep_test <- cbind(fix_scale(test_df, ordinal_variables),
+                 dummy_encode(test_df),
+                 test_df[ ,ordinal_variables]
+                 )
+
+df_prep <- df_prep[ , c(names(df_prep_test), 'target_variable')]
+
+boosting_tree_model<-xgboost(booster='gbtree', 
+               data = data.matrix(dplyr::select(df_prep, -c('target_variable'))),
+               label = df_prep$target_variable, 
+               nrounds = 200,
+               objective='reg:linear')
+
+pred <- predict(boosting_tree_model, data.matrix(df_prep_test), type='response')
+
+output <- cbind(df_prep_test, pred)
+output$price <- exp(output$pred)
+
+output <- cbind(test_df_ids, output$price)
+colnames(output) <- c('id', 'price_pred')
+
+write.csv(output, 'Paul_Jacques-Mignault_Price_pred-.csv', 
+          row.names=FALSE) # And voilà!
+
+```
+
+# Conclusion
+
+...
+
+```{r conclusion, echo=FALSE}
+
+www <- 'https://raw.githubusercontent.com/paul-jm/House_Prices/master/kc_house_data.csv'
+real_df <- read.csv(www, header = TRUE, sep=",") 
+
+combined_df <- merge(x = output, y = real_df, by = 'id', all.x = TRUE)[ ,c('id',
+                                                                           'price_pred', 
+                                                                           'price')]
+
+mape(real = combined_df$price, predicted = combined_df$price_pred) 
+
+```
+
+0.1245628
+
+...
