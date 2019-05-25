@@ -2,10 +2,16 @@
 title: "Paul_Jacques-Mignault_Individual_Black_Friday"
 author: "Paul Jacques-Mignault"
 date: '2019-05-20'
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
-```{r setup, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+The present analysis aims to predict house prices in King's County, Washington. This country includes Seattle. The challenge is to predict house prices for listings in 2014 and 2015, while minimizing the MAPE (Mean absolute percentage error). The dataset is available on Kaggle, and is also in the github repository sourced in the R code. The dependencies, including R libraries and functions saved in other R files are also listed in the present. 
+
+The train dataset has 17,277 rows and 20 columns. The 20 columns include 19 features (Excluding the 'id' column), including the target variable, 'price'. The data types encompass characters, integers, and numerical variables. Variables include sqare footage, number of floors, rooms, whether or not the listing is facing the waterfront, etc. 
+
+```{r setup, echo=FALSE, warning=FALSE, message=FALSE}
 
 knitr::opts_chunk$set(echo = TRUE)
 
@@ -34,9 +40,9 @@ test_df$id <- NULL
 
 ```
 
-## Exploratory Data Analysis
+## Custom Functions
 
-...
+The customs functions are included in the R code, though are excluded from the present document in order to lighten the format.  
 
 ```{r custom_functions, echo=FALSE}
 
@@ -287,7 +293,7 @@ run_xgbr <- function(lst) {
     xgb_reg_0<-xgboost(booster='gblinear', 
                data = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))),
                label = whole_data$train$target_variable, 
-               nrounds = 250,
+               nrounds = 200,
                objective='reg:linear')
     
     test_xgbr <- predict(xgb_reg_0, newdata = data.matrix(dplyr::select(whole_data$test, 
@@ -302,7 +308,15 @@ run_xgbr <- function(lst) {
 
 ## Data Preparation
 
-...
+Though the dataset is relatively clean, with no NA values, some data types do need to be altered. The following data preparation processes were applied to fix data types:
+
+- The 'date' column was parsed into day, month, and year. This data will be leveraged in the exploratory data analysis stage. 
+
+- Several variables had been read as integers or numerical variables; however, they should be ordinal factor variables.  'waterfront', 'view', 'condition', 'grade', and 'zipcode' were modified to factor variables. For instance, the 'view' variable indicates levels of the quality of the view from the property; it should thus considered an ordinal factor variable. 
+
+- Finally, for the sake of consistency, all remaining integer variables that were not changed to factors were changed to numerical. 
+
+Once again, there were no NA values in the target variables, hence no tuples were dropped. 
 
 ```{r fix_data_types, echo=FALSE}
 
@@ -322,9 +336,31 @@ sum(is.na(train_df$price)) # Just making sure
 
 ```
 
-## Exploratory Data Analysis
+## Exploratory Data Analysis (EDA)
 
-Location, location, location!
+In order to gain a better understanding of the dataset, the following visualizations will help the user target which variables are most relevant to establish the 'price' variable. 
+
+- The house price histogram clearly illustrates that the 'price' variable is highly right-skewed; the vast majority of listings, while very few listings are highly expensive. This information will be important when establishing a baseline, as some algorithms assume normal distribution of variables. 
+
+Furthermore, all factor variables were graphed in boxplots to understand their distributions, and displayed in histograms to deduce their relationship with the target variabel:
+
+- The 'view' variable listed most properties as having an attribute of '0'; and there was a smug but positive relationship with the price variable. 
+
+- For the 'condidtion' variables, most properties had either '3', '4', or '5'; there was once again little direct relationship with the price variable. 
+
+- With 13 levels, the 'grade' variable supported more information. While most properties boasted an average grade, there was a clear positive relationship with the target variable. The average price for properties with grade '13' was USD 3,000,000, compared to less than half a million for those of grade '7'.
+
+- The binary variable 'waterfront' did not support much information. Only a handful of properties had '1', and there was no significant relationship with the 'price' variable, at least when reading the graph. 
+
+For the numerical variables, the following EDA was carried out:
+
+- A correlation heatmap is provided; though only for variables with an absolute value of the correlation coefficient higher than 0.2. Overall, the most highly correlated variables with 'price', are those related to the square footage of the property. This makes intuitive sense; despite discrepancies between locations, bigger houses tend to be worth more. The living space of the property delivers a correlation coefficient of 0.7.
+
+- This variable, 'sqft_living', is plotted against the price variable. Though the positive relationship is clear with smaller and more affordable houses, larger house prices tend to be less predictable. For instance, the user can perceive the following outlier: the largest house in the dataset, of 15,000 square feet, is worth USD 2,000,000, and is far from being the most expensive. 
+
+No particular seasonality is observed in the dataset. However, the user can deduct from the visualization below that there is not significant seasonalisty in terms or house prices, though houses sold in the spring time tend to be slightly more expensive. House prices have held steady between 2014 and 2015. 
+
+Finally, the various properties sold were mapped in the present EDA, with each color assigned a decile, from red for affordable properties, and green for expensive ones. From there, the user can understand the concentration of expensive listings. In real estate, location is key. It is obvious from the map that Seattle's Northern areas are overall wealthier, and the Southern parts are less well-off. Nearly all properties in Downtown Seattle, Mercer Island, and the Bellevue Area belong to the most expensive decile of listings. 
 
 ```{r eda, echo=FALSE}
 
@@ -415,12 +451,23 @@ create_map(map_train_df)
 
 ## Data Preparation
 
-...
+As previously mentioned, the dataset is relatively clean and requires little data preparation. Variables 'day', a.k.a. the day in the month the property was sold, and 'waterfront' were dropped. The latter was excluded from the analysis since it only represented a small fraction of properties - approximately 1% - making it impossible for the model to train on that variable. 
+
+The skewness of the target variable 'price' is 4, much superior to the acceptable range of -1 to 1. Several algorithms do assume normal distribution of variables to train. In order to ameliorate this issue, the model will train on the logarithm of the 'price' variable, and the results will be analysed using the exponent of the prediction. 
+
+The following actions were carried out to prepare the data to establish a baseline model:
+
+- Skewness and scale were corrected for all continuous numeerical variables, including all square footabe variables.
+
+- Ordinal factor variables were one-hot encoded: the variables are 'bathrooms', 'floors', 'lat', 'long', 'bedrooms', 'yr_built', 'yr_renovated', 'year', and 'month'.
+
+Furthermore, a baseline was established for the model, following the data preparation. The simplest model was used for baseline; the linear regression. The model delivered a MAPE of 13.65%. 
 
 ```{r data_prep_baseline, echo=FALSE}
 
 train_df$waterfront <- NULL # Can't train on 1% of data!
 train_df$day <- NULL
+skew(train_df$price)
 target_variable <- log(train_df$price)
 train_df$price <- NULL
 
@@ -441,7 +488,21 @@ eval_against_baseline(df_prep, formula = formula, target_variable = target_varia
 
 ## Feature Engineering
 
-...
+In order to improve on the baseline, the following feature engineering processes were undertaken:
+
+1/ For ordinal and factor variables, extraneous levels were combined with one another. Rather labeling all variables with less than 10% of representation in the dataset with 'other', levels were grouped following their proximity. For instance, levels of the 'view' factor '1' and '2' were combined, and so were levels '3' and '4'. This allows the model to train on various levels of view variable, combining extraneous levels that had little to do with one another, e.g. combining 1 and 4. With the linear regression model, this initiative delivered a MAPE of 14.48%, slightly worse than the baseline.
+
+2/ The second tentative was to cluster properties by location. As the user has seen in the EDA, expensive listings tend to belong to the same areas, and so do more affordable ones. Using the k-means algorithm, with variables 'long' and 'lat' as explanatory features. Having as many as 10 clusters allows the clustering algorithm to have minimal sum of squares withing clusters, while having a relatively balanced output; each cluster included roughly 10% of listings. Adding a cluster variable resulted in a MAPE of 19.26%, significantly worse than the baseline. 
+
+3/ The third tentative involved creating a new feature keeping track of the house's age; the difference between the year of sale and the year built. This numeric feature was scaled and fixed for skewness. This new feature slightly improved on the baseline, and resulted in a MAPE of 13.51%.
+
+4/ The fourth attempt was to create a binary variable indicated whether or not the house had been renovated in the last 5 years, which is likely to increase the house's value. The resulting MAPE was 13.64%, very close to the baseline.
+
+5/ The fifth attempt was to create a binary variable indicated whether or not the house had a basement, which is likely to increase the house's value. The resulting MAPE was 13.65%, slightly worse than the baseline.
+
+6/ The sixth and last attempt was to compare the house's living space with that of the 15 closest neighbours. If the house were much larger than those in the rest of the neighbourhood, this may increase the value of the house. The resulting MAPE as 13.63%, a slight improvement over the baseline. 
+
+Finally, a recursive feature selection process was undertaken for the dataset. Since it was fairly computationally expensive, and provided limited benefits over the baseline, this process was hashtagged in the R code. 
 
 ```{r feature_eng, echo=FALSE}
 
@@ -509,7 +570,7 @@ eval_against_baseline(df_prep_F3, formula = formula, target_variable = target_va
 # Slight improvement!
 # The improvement is hardly significant, though. 
 
-# Fourth step: 
+# Fourth step: Establish if the house has been renovated. 
 
 train_df_reno <- reno_variable(train_df)
 
@@ -569,11 +630,15 @@ subsets <- c(25, 50, 75, 100)
 
 ```
 
-## Data Preparation
+## Model Selection
 
-boost_tree     0.1210463
+The following models were attempted for all the aforementioned feature engineering processes. The algorithms are: Basix R partitioning tree, random forest, gradient boosting tree, a regression with stepwise feature selection, regression with regularization, and boosting regression. 
 
-```{r model_selection, echo=FALSE}
+Both stepwise and regularization regressions aim at reducing the number of features to strictly retain the most significant ones to minimize the chances of overfitting.. The results will be displayed in the following results table. The lowest MAPE occurs for 'df_prep', which is the train data frame which has not received any feature engineering process, for the gradient boosting tree algorithm. It is fairly typical of xgboost algorithms to outperform others in prediction problems. 
+
+**The resulting MAPE on the test set is 12.10%, outperforming the baseline by 1.5 percentage points.** 
+
+```{r model_selection, echo=FALSE, results='hide'}
 
 df_prep_list <- list(df_prep, df_prep_F1, df_prep_F2, df_prep_F3,
                      df_prep_F4, df_prep_F5, df_prep_F6)
@@ -607,17 +672,25 @@ colnames(results_table) <- c('df_prep', 'df_prep_F1', 'df_prep_F2', 'df_prep_F3'
 rownames(results_table) <- c('partition_tree','rand_for','boost_tree',
                           'sw_reg','reg_reg', 'boost_reg')
 
+```
+
+
+```{r results, echo = FALSE}
+
 results_table
 
 # Compared to baselin of 0.136493, we have improved :)
 
 ```
 
+
 # Cross-Validation
 
-...
+The next step involves cross-validating our model, in order to ensure it is resilient to different and will not behave erratically when presented with other datasets. With the same hyperparameter for the xgboost algorith, i.e. 200 trees, the model was cross-validated with 10 folds. 
 
-```{r cross_validation, echo = FALSE}
+In the following graph, the user can perceive that as the number of iterations increases to 200, the mean absolute error decreases progressively across the 10 folds. For the 200th iteration, the mean absolute error reaches USD 67,647.99, compared to an average listing price of USD 539,805. This implies an an average percentage error of 12.5, consistent with the results found in the model selection phase. 
+
+```{r cross_validation, echo = FALSE, results="hide"}
 
 set.seed(1)
 
@@ -655,9 +728,11 @@ cv_plot
 
 # Model Deployment
 
-...
+Finally, after cross-validating the model, the next step is to deploy it on the test set, which does not include the 'price' variable. The same gradient boosting model with 200 trees is applied, after the same data preparation processes used for the train dataset. No feature engineering process is applied, since the best-performing model on the train set did not include any of those. 
 
-```{r deployment, echo = FALSE}
+A final .csv file is written, with the 'id' of the property, and the price prediction in the 'price_pred' column. 
+
+```{r deployment, echo = FALSE, results = 'hide'}
 
 test_df
 
@@ -682,10 +757,10 @@ df_prep_test <- cbind(fix_scale(test_df, ordinal_variables),
                  test_df[ ,ordinal_variables]
                  )
 
-df_prep <- df_prep[ , c(names(df_prep_test), 'target_variable')]
+df_deploy <- df_prep[ , c(names(df_prep_test), 'target_variable')]
 
 boosting_tree_model<-xgboost(booster='gbtree', 
-               data = data.matrix(dplyr::select(df_prep, -c('target_variable'))),
+               data = data.matrix(dplyr::select(df_deploy, -c('target_variable'))),
                label = df_prep$target_variable, 
                nrounds = 200,
                objective='reg:linear')
@@ -698,14 +773,16 @@ output$price <- exp(output$pred)
 output <- cbind(test_df_ids, output$price)
 colnames(output) <- c('id', 'price_pred')
 
-write.csv(output, 'Paul_Jacques-Mignault_Price_pred-.csv', 
+write.csv(output, 'Paul_Jacques-Mignault_Price_pred.csv', 
           row.names=FALSE) # And voilà!
 
 ```
 
 # Conclusion
 
-...
+In conclusion, several variables do incluence Seattle's property prices, though the full dataset with more than 21,000 tuples is pulled from kaggle. This allows the present script to assess the predictions made on the test dataset against the real data pulled from kaggle. **When benchmarked against the actual house prices, the test set's MAPE is 12.46%.** This result is consistent with those obtained after fitting the model, and in the cross-validation as well. 
+
+Though both feature engineering and feature selection algorithms failed to improve over the baseline, the xgboost model outperformed other models with a limited number of trees. This is a demonstration that often times, the simplest processes and algorithms work best. 
 
 ```{r conclusion, echo=FALSE}
 
@@ -716,10 +793,6 @@ combined_df <- merge(x = output, y = real_df, by = 'id', all.x = TRUE)[ ,c('id',
                                                                            'price_pred', 
                                                                            'price')]
 
-mape(real = combined_df$price, predicted = combined_df$price_pred) 
+mape(real = combined_df$price, predicted = combined_df$price_pred)  
 
 ```
-
-0.1245628
-
-...
