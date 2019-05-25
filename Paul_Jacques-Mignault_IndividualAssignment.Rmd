@@ -11,7 +11,7 @@ The present analysis aims to predict house prices in King's County, Washington. 
 
 The train dataset has 17,277 rows and 20 columns. The 20 columns include 19 features (Excluding the 'id' column), including the target variable, 'price'. The data types encompass characters, integers, and numerical variables. Variables include sqare footage, number of floors, rooms, whether or not the listing is facing the waterfront, etc. 
 
-```{r setup, echo=FALSE, warning=FALSE, message=FALSE}
+```{r setup, echo=FALSE, warning=FALSE, message=FALSE, results='hide'}
 
 knitr::opts_chunk$set(echo = TRUE)
 
