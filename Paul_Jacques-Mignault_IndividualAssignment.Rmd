@@ -1,0 +1,798 @@
+---
+title: "Paul_Jacques-Mignault_Individual_Black_Friday"
+author: "Paul Jacques-Mignault"
+date: '2019-05-20'
+output:
+  html_document: default
+  pdf_document: default
+---
+
+The present analysis aims to predict house prices in King's County, Washington. This country includes Seattle. The challenge is to predict house prices for listings in 2014 and 2015, while minimizing the MAPE (Mean absolute percentage error). The dataset is available on Kaggle, and is also in the github repository sourced in the R code. The dependencies, including R libraries and functions saved in other R files are also listed in the present. 
+
+The train dataset has 17,277 rows and 20 columns. The 20 columns include 19 features (Excluding the 'id' column), including the target variable, 'price'. The data types encompass characters, integers, and numerical variables. Variables include sqare footage, number of floors, rooms, whether or not the listing is facing the waterfront, etc. 
+
+```{r setup, echo=FALSE, warning=FALSE, message=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(devtools)
+
+source_url('https://raw.githubusercontent.com/paul-jm/House_Prices/master/load_libraries_ml.R')
+source_url('https://raw.githubusercontent.com/paul-jm/House_Prices/master/f_partition_sirio.R')
+source_url('https://raw.githubusercontent.com/paul-jm/House_Prices/master/regression_metrics.R')
+
+www <- 'https://raw.githubusercontent.com/paul-jm/House_Prices/master/house_price_train.csv'
+train_df <- read.csv(www, header = TRUE, sep=",") 
+
+www <- 'https://raw.githubusercontent.com/paul-jm/House_Prices/master/house_price_test.csv'
+test_df <- read.csv(www, header = TRUE, sep=",") 
+
+head(train_df)
+dim(train_df)
+str(train_df)
+
+head(test_df)
+dim(test_df)
+
+test_df_ids <- test_df$id # Keep the id's in a separate vector
+train_df$id <- NULL
+test_df$id <- NULL
+
+```
+
+## Custom Functions
+
+The customs functions are included in the R code, though are excluded from the present document in order to lighten the format.  
+
+```{r custom_functions, echo=FALSE}
+
+get_num_columns <- function(df) {
+  int_cols <- names(df[sapply(df, is.integer)])
+  num_cols <- setdiff(names(df[sapply(df, is.numeric)]),
+                      names(df[sapply(df, is.integer)]))
+  df <- df[ , num_cols]
+}
+
+fix_dates <- function(df) {
+  df[ , 'date'] <- as.Date(df[ , 'date'],format = "%m/%d/%Y")
+  df %>%
+    separate(date, sep="-", into = c("year", "month", "day"))
+}
+
+fix_factors <- function(df, lst) {  
+  df[, lst] <- data.frame(apply(df[, lst],2, as.factor))
+}
+
+fix_int <- function(df, lst) {
+  integers_col <- names(df[sapply(df, is.integer)])
+  factor_list <- setdiff(integers_col, lst)
+  df[ , factor_list] <-
+      lapply(df[ , factor_list], as.numeric)
+}
+
+fix_skew <- function(df, lst) {
+  numericVarNames <- names(which(sapply(df, is.numeric)))
+  numericVarNames <- numericVarNames[!numericVarNames %in% lst]
+  
+  df_numeric <- df[, names(df) %in% numericVarNames]
+  for(i in 1:ncol(df_numeric)){
+          if (abs(skew(df_numeric[ ,i]))>0.8){
+                  df_numeric[,i] <- log(df_numeric[,i] +1)
+    }
+  }
+  return(df_numeric)
+}  
+
+fix_scale <- function(df, lst){
+  df_numeric <- fix_skew(df, lst)  
+    for(i in 1:ncol(df_numeric)){
+      df_numeric[,i] <- scale(df_numeric[,i],center= TRUE, scale=TRUE)
+    }
+  return(df_numeric)
+}
+
+dummy_encode <- function(df) {
+  
+  df_factors <- data.frame(df[sapply(df, is.factor)])
+  df_factors_encode <- caret::dummyVars(" ~ .", data = df_factors, fullRank=T,sep = "_")
+  df_factors_encode <- data.table(predict(df_factors_encode, newdata = df_factors))
+  names(df_factors_encode)<-gsub('-','_',names(df_factors_encode))
+  return(df_factors_encode)
+  
+}
+
+eval_against_baseline <- function(df, formula, target_variable) {
+  whole_data <- f_partition(df,
+                          test_proportion = 0.2,
+                          seed = 1)
+  
+  formula<-as.formula(target_variable~.)   # price against all other variables
+  
+  lm_0 <- lm(formula = formula,
+                   data=whole_data$train)
+  
+  test_lm<-predict(lm_0, newdata = whole_data$test)
+  
+  mape_lm<-mape(real= exp(whole_data$test$target_variable), predicted = exp(test_lm))
+  mape_lm
+}
+
+fix_extraneous_variables <- function(df) {
+  df$view <- as.numeric(df$view)
+  df$condition <- as.numeric(df$condition)
+  df$grade <- as.numeric(df$grade)
+  
+  df$view[df$view == 0 ] <- 0
+  df$view[df$view == 1 | df$view == 2 ] <- 1
+  df$view[df$view == 3 | df$view == 4 ] <- 2
+  
+  df$condition[df$condition == 0 | df$condition == 1 | df$condition == 2 ] <- 0
+  df$condition[df$condition == 3] <- 1
+  df$condition[df$condition == 4 | df$condition == 5] <- 2
+
+  df$grade[df$grade <= 8] <- 0
+  df$grade[df$grade == 9] <- 1
+  df$grade[df$grade == 10 | df$grade == 11] <- 2
+  df$grade[df$grade == 12 | df$grade == 13] <- 3
+  
+  df$view <- as.factor(df$view)
+  df$condition <- as.factor(df$condition)
+  df$grade <- as.factor(df$grade)
+  
+  return(df)
+}
+
+house_age_variable <- function(df) {
+  train_df_age <- df
+  train_df_age$year <- as.numeric(train_df_age$year)
+  train_df_age$house_age <- train_df_age$year - train_df_age$yr_built
+  
+  train_df_age$new_house[train_df_age$house_age <= 5] <- 1
+  train_df_age$new_house[train_df_age$house_age > 5] <- 0
+  train_df_age$new_house <- as.factor(train_df_age$new_house)
+  return(train_df_age)
+}
+
+reno_variable <- function(df) {
+  train_df_reno <- train_df
+  train_df_reno$year <- as.numeric(train_df_reno$year)
+  train_df_reno$reno_age <- train_df_reno$year - train_df_reno$yr_renovated
+  
+  train_df_reno$reno_age[train_df_reno$reno_age <= 5] <- 1
+  train_df_reno$reno_age[train_df_reno$reno_age > 5] <- 0
+  train_df_reno$reno_age <- as.factor(train_df_reno$reno_age)
+  return(train_df_reno)
+}
+
+basement_var <- function(df) {
+  train_df_space <- df
+  train_df_space$sqft_basement[train_df_space$sqft_basement > 0] <- 1
+  train_df_space$sqft_basement <- as.factor(train_df_space$sqft_basement)
+  return(train_df_space)
+}
+
+neighbour_var <- function(df) {
+  train_df_neighbour <- df
+  train_df_neighbour$neighbour <- train_df_neighbour$sqft_living / train_df_neighbour$sqft_living15
+  train_df_neighbour$neighbour <- as.numeric(train_df_neighbour$neighbour)
+  return(train_df_neighbour)
+}
+
+run_part_tree <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    tree_0<-rpart(formula = formula, data = whole_data$train, method = 'anova', model=TRUE)
+    test_tree<-predict(tree_0, newdata = whole_data$test,type = 'vector') 
+    mape_tree<-mape(real=exp(whole_data$test$target_variable), predicted = exp(test_tree))
+    result_lst[i] <- mape_tree
+  } 
+  return(result_lst)
+}
+
+run_rf <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    rf_1 <- ranger(formula, whole_data$train)
+    test_rf1 <- predict(rf_1,whole_data$test)$predictions
+    mape_rf <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_rf1))
+    result_lst[i] <- mape_rf
+  } 
+  return(result_lst)
+}
+
+run_bt <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    
+    xgb_0<-xgboost(booster='gbtree', 
+               data = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))),
+               label = whole_data$train$target_variable, 
+               nrounds = 200,
+               objective='reg:linear')
+    
+    test_xgb<-predict(xgb_0, newdata = data.matrix(dplyr::select(whole_data$test, 
+                                                               -c('target_variable'))), type='response')
+    mape_bt <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_xgb))
+    result_lst[i] <- mape_bt
+  } 
+  return(result_lst)
+}
+
+run_swr <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    
+    lm_0 <- stepAIC(lm(formula = formula, # You want AIC to be as low as possible
+                 data=whole_data$train),
+              trace=F)
+    
+    test_lm <- predict(lm_0, newdata = whole_data$test)
+    mape_swr <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_lm))
+    result_lst[i] <- mape_swr
+  } 
+  return(result_lst)
+}
+
+run_reg <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    
+    glmnet_cv<-cv.glmnet(x = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))),
+                     nfolds = 5,
+                     y = whole_data$train[['target_variable']],
+                     alpha=1, # Everything between 0 and 1 is an elastic net
+                     family = 'gaussian',
+                     standardize = T)
+    
+    glmnet_0<-glmnet(x = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))), 
+                 y = whole_data$train[['target_variable']],
+                 family = 'gaussian',
+                 alpha=1, lambda = glmnet_cv$lambda.min)
+    
+    test_glmnet<-predict(glmnet_0, newx = data.matrix(dplyr::select(whole_data$test, -c('target_variable'))))    
+    mape_reg <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_glmnet))
+    result_lst[i] <- mape_reg
+  } 
+  return(result_lst)
+}
+
+run_xgbr <- function(lst) {
+  result_lst <- c()
+  for (i in 1:length(lst)) {
+    whole_data <- f_partition(lst[[i]],
+                              test_proportion = 0.2,
+                              seed = 1)
+    
+    formula<-as.formula(target_variable~.)   # price against all other variables
+    
+    xgb_reg_0<-xgboost(booster='gblinear', 
+               data = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))),
+               label = whole_data$train$target_variable, 
+               nrounds = 200,
+               objective='reg:linear')
+    
+    test_xgbr <- predict(xgb_reg_0, newdata = data.matrix(dplyr::select(whole_data$test, 
+                                                               -c('target_variable'))), type='response')
+    mape_xgbr <- mape(real=exp(whole_data$test$target_variable), predicted = exp(test_xgbr))
+    result_lst[i] <- mape_xgbr
+  } 
+  return(result_lst)
+}
+
+```
+
+## Data Preparation
+
+Though the dataset is relatively clean, with no NA values, some data types do need to be altered. The following data preparation processes were applied to fix data types:
+
+- The 'date' column was parsed into day, month, and year. This data will be leveraged in the exploratory data analysis stage. 
+
+- Several variables had been read as integers or numerical variables; however, they should be ordinal factor variables.  'waterfront', 'view', 'condition', 'grade', and 'zipcode' were modified to factor variables. For instance, the 'view' variable indicates levels of the quality of the view from the property; it should thus considered an ordinal factor variable. 
+
+- Finally, for the sake of consistency, all remaining integer variables that were not changed to factors were changed to numerical. 
+
+Once again, there were no NA values in the target variables, hence no tuples were dropped. 
+
+```{r fix_data_types, echo=FALSE, results='hide'}
+
+# Changing variable types where appropriate
+
+factor_variables <- c('waterfront', 'view', 'condition', 'grade', 'zipcode')
+
+train_df <- cbind(get_num_columns(train_df),
+                  fix_dates(train_df)[ ,c('year', 'month', 'day')],
+                  fix_factors(train_df, factor_variables), 
+                  fix_int(train_df, factor_variables))
+
+
+str(train_df)
+
+sum(is.na(train_df$price)) # Just making sure
+
+```
+
+## Exploratory Data Analysis (EDA)
+
+In order to gain a better understanding of the dataset, the following visualizations will help the user target which variables are most relevant to establish the 'price' variable. 
+
+- The house price histogram clearly illustrates that the 'price' variable is highly right-skewed; the vast majority of listings, while very few listings are highly expensive. This information will be important when establishing a baseline, as some algorithms assume normal distribution of variables. 
+
+Furthermore, all factor variables were graphed in boxplots to understand their distributions, and displayed in histograms to deduce their relationship with the target variabel:
+
+- The 'view' variable listed most properties as having an attribute of '0'; and there was a smug but positive relationship with the price variable. 
+
+- For the 'condidtion' variables, most properties had either '3', '4', or '5'; there was once again little direct relationship with the price variable. 
+
+- With 13 levels, the 'grade' variable supported more information. While most properties boasted an average grade, there was a clear positive relationship with the target variable. The average price for properties with grade '13' was USD 3,000,000, compared to less than half a million for those of grade '7'.
+
+- The binary variable 'waterfront' did not support much information. Only a handful of properties had '1', and there was no significant relationship with the 'price' variable, at least when reading the graph. 
+
+For the numerical variables, the following EDA was carried out:
+
+- A correlation heatmap is provided; though only for variables with an absolute value of the correlation coefficient higher than 0.2. Overall, the most highly correlated variables with 'price', are those related to the square footage of the property. This makes intuitive sense; despite discrepancies between locations, bigger houses tend to be worth more. The living space of the property delivers a correlation coefficient of 0.7.
+
+- This variable, 'sqft_living', is plotted against the price variable. Though the positive relationship is clear with smaller and more affordable houses, larger house prices tend to be less predictable. For instance, the user can perceive the following outlier: the largest house in the dataset, of 15,000 square feet, is worth USD 2,000,000, and is far from being the most expensive. 
+
+No particular seasonality is observed in the dataset. However, the user can deduct from the visualization below that there is not significant seasonalisty in terms or house prices, though houses sold in the spring time tend to be slightly more expensive. House prices have held steady between 2014 and 2015. 
+
+Finally, the various properties sold were mapped in the present EDA, with each color assigned a decile, from red for affordable properties, and green for expensive ones. From there, the user can understand the concentration of expensive listings. In real estate, location is key. It is obvious from the map that Seattle's Northern areas are overall wealthier, and the Southern parts are less well-off. Nearly all properties in Downtown Seattle, Mercer Island, and the Bellevue Area belong to the most expensive decile of listings. 
+
+```{r eda, echo=FALSE}
+
+summary(train_df$price)
+
+price_hist <- ggplot(data = train_df, aes(x=price)) +
+        geom_histogram(fill="pink", binwidth = 50000) # Pink just cause
+        scale_x_continuous(breaks= seq(0, 8000000, by=1000000), labels = comma) 
+        
+price_hist <- price_hist + theme_tufte() + ggtitle('House Price Histogram')
+
+price_hist
+
+for (i in factor_variables[factor_variables!='zipcode'])
+    { variable_plot <- (ggplot(data = train_df, aes(x=as.factor(train_df[ ,i]), y=price))+
+            geom_boxplot(col='pink') + labs(x = i) +
+            scale_y_continuous(breaks= seq(0, 8000000, by=1000000), labels = comma)
+            + theme_tufte() + ggtitle(paste0(i,' vs House Price')))
+    print(variable_plot)
+  }
+
+for (i in factor_variables[factor_variables!='zipcode'])
+  { variable_plot <- (ggplot(data = train_df, aes(x=as.factor(train_df[ ,i]))) +
+        geom_density(stat='count', colour="pink") + labs(x = i)
+          + theme_tufte() + ggtitle(paste0(i,' Density Graph')))
+    print(variable_plot)
+  }
+
+num_var <- train_df[, names(train_df[sapply(train_df, is.numeric)])]
+cor_num_var <- cor(num_var, use="pairwise.complete.obs") #correlations of all numeric variables
+
+#sort on decreasing correlations with house price
+cor_sorted <- as.matrix(sort(cor_num_var[,'price'], decreasing = TRUE))
+ #select correlations stronger than 0.5
+CorHigh <- names(which(apply(cor_sorted, 1, function(x) abs(x)>0.2)))
+cor_num_var <- cor_num_var[CorHigh, CorHigh]
+corrplot.mixed(cor_num_var, tl.col="black", tl.pos = "lt", mar=c(2,2,2,2)) + theme_tufte()
+
+# The variable with the highest correlation to the house price is 'sqft_living'.
+# Let's have a closer look at this variable with 0.7 r2 correlation with the target.
+
+sqft_living_viz <- ggplot(data = train_df, aes( x = sqft_living, y = price))+
+        geom_point(col='pink') + geom_smooth(method = "lm", se=FALSE, color="brown", aes(group=1)) +
+        scale_y_continuous(breaks= seq(0, 8000000, by=1000000), labels = comma)
+
+sqft_living_viz <- sqft_living_viz + theme_tufte() + ggtitle('Living Space vs. House Price')
+
+sqft_living_viz
+
+yearly_sales <- ggplot(data = train_df, aes(x=as.factor(year), y=price)) +
+        geom_bar(stat='summary', fun.y = "median", fill='pink')+
+        scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = comma) +
+        geom_label(stat = "count", aes(label = ..count.., y = ..count..), size = 3) +
+        coord_cartesian(ylim = c(0, 500000)) + theme_tufte()
+
+monthly_sales <- ggplot(data = train_df, aes(x=as.factor(month), y=price)) +
+        geom_bar(stat='summary', fun.y = "median", fill='pink')+
+        scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = comma) +
+        geom_label(stat = "count", aes(label = ..count.., y = ..count..), size = 3) +
+        coord_cartesian(ylim = c(0, 500000)) + theme_tufte()
+
+grid.arrange(monthly_sales, yearly_sales, widths=c(2,1), top = "Sales Historical Time Series")
+
+#Creates map in order to better understand Seattle's real estate market
+
+map_train_df <- train_df[ ,c('long','lat','price')]
+map_train_df$decile <- ntile(map_train_df$price, 10)
+beatCol <- colorFactor(palette = 'RdYlGn', map_train_df$decile)
+
+create_map <- function(dataset){
+  
+  #Print map
+  my_map <- leaflet(data.frame(dataset)) %>%
+    addTiles() %>%  # Add default OpenStreetMap map tiles
+    addCircleMarkers(lng=~long, lat=~lat,
+                     color = ~beatCol(decile), 
+                     popup = map_train_df$price,
+                     radius = 0.3) %>% 
+    addLegend("bottomright", pal = beatCol, values = map_train_df$decile, 
+              title = 'Real Estates Price <br>Deciles (1 = 10% <br> Cheapest, 10 = 10% <br> most Expensive)',                 opacity = 1)
+  
+  return(my_map)
+}
+
+create_map(map_train_df)
+
+```
+
+## Data Preparation
+
+As previously mentioned, the dataset is relatively clean and requires little data preparation. Variables 'day', a.k.a. the day in the month the property was sold, and 'waterfront' were dropped. The latter was excluded from the analysis since it only represented a small fraction of properties - approximately 1% - making it impossible for the model to train on that variable. 
+
+The skewness of the target variable 'price' is 4, much superior to the acceptable range of -1 to 1. Several algorithms do assume normal distribution of variables to train. In order to ameliorate this issue, the model will train on the logarithm of the 'price' variable, and the results will be analysed using the exponent of the prediction. 
+
+The following actions were carried out to prepare the data to establish a baseline model:
+
+- Skewness and scale were corrected for all continuous numeerical variables, including all square footabe variables.
+
+- Ordinal factor variables were one-hot encoded: the variables are 'bathrooms', 'floors', 'lat', 'long', 'bedrooms', 'yr_built', 'yr_renovated', 'year', and 'month'.
+
+Furthermore, a baseline was established for the model, following the data preparation. The simplest model was used for baseline; the linear regression. The model delivered a MAPE of 13.65%. 
+
+```{r data_prep_baseline, echo=FALSE}
+
+train_df$waterfront <- NULL # Can't train on 1% of data!
+train_df$day <- NULL
+skew(train_df$price)
+target_variable <- log(train_df$price)
+train_df$price <- NULL
+
+ordinal_variables <- c('bathrooms','floors','lat','long',
+                      'bedrooms','yr_built','yr_renovated',
+                      'year','month')
+
+df_prep <- cbind(fix_scale(train_df, ordinal_variables),
+                 dummy_encode(train_df),
+                 train_df[ ,ordinal_variables],
+                 target_variable)
+
+# Establish a plain linear regression baseline
+eval_against_baseline(df_prep, formula = formula, target_variable = target_variable)
+# Not too bad for a first trial!
+ 
+```
+
+## Feature Engineering
+
+In order to improve on the baseline, the following feature engineering processes were undertaken:
+
+1/ For ordinal and factor variables, extraneous levels were combined with one another. Rather labeling all variables with less than 10% of representation in the dataset with 'other', levels were grouped following their proximity. For instance, levels of the 'view' factor '1' and '2' were combined, and so were levels '3' and '4'. This allows the model to train on various levels of view variable, combining extraneous levels that had little to do with one another, e.g. combining 1 and 4. With the linear regression model, this initiative delivered a MAPE of 14.48%, slightly worse than the baseline.
+
+2/ The second tentative was to cluster properties by location. As the user has seen in the EDA, expensive listings tend to belong to the same areas, and so do more affordable ones. Using the k-means algorithm, with variables 'long' and 'lat' as explanatory features. Having as many as 10 clusters allows the clustering algorithm to have minimal sum of squares withing clusters, while having a relatively balanced output; each cluster included roughly 10% of listings. Adding a cluster variable resulted in a MAPE of 19.26%, significantly worse than the baseline. 
+
+3/ The third tentative involved creating a new feature keeping track of the house's age; the difference between the year of sale and the year built. This numeric feature was scaled and fixed for skewness. This new feature slightly improved on the baseline, and resulted in a MAPE of 13.51%.
+
+4/ The fourth attempt was to create a binary variable indicated whether or not the house had been renovated in the last 5 years, which is likely to increase the house's value. The resulting MAPE was 13.64%, very close to the baseline.
+
+5/ The fifth attempt was to create a binary variable indicated whether or not the house had a basement, which is likely to increase the house's value. The resulting MAPE was 13.65%, slightly worse than the baseline.
+
+6/ The sixth and last attempt was to compare the house's living space with that of the 15 closest neighbours. If the house were much larger than those in the rest of the neighbourhood, this may increase the value of the house. The resulting MAPE as 13.63%, a slight improvement over the baseline. 
+
+Finally, a recursive feature selection process was undertaken for the dataset. Since it was fairly computationally expensive, and provided limited benefits over the baseline, this process was hashtagged in the R code. 
+
+```{r feature_eng, echo=FALSE, results='hide'}
+
+# First step: Regroup extraneous variables where needed
+train_df_group <- fix_extraneous_variables(train_df)
+str(train_df_group)
+
+factor_variables<-names(train_df_group)[sapply(train_df_group, is.factor)]
+count_factor_variables<-sapply(train_df_group[,factor_variables], summary)
+
+df_prep_F1 <- cbind(fix_scale(train_df_group, ordinal_variables),
+                 dummy_encode(train_df_group),
+                 train_df_group[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F1, formula = formula, target_variable = target_variable)
+# Slightly worse than baseline; we will discard this effort. 
+
+# Second step: Get rid of the zipcode and replace with a cluster variable, 
+# which will indicate if the listing is in an expensive or affordable neighbourhood. 
+
+train_df_geo <- train_df[ ,c('long','lat')]
+
+k.max <- 10 
+within_sum_squares <- sapply(2:k.max, 
+              function(k) {kmeans (train_df_geo, 
+                                   k, nstart=50,iter.max = 15 )$tot.withinss}) 
+
+within_sum_squares # View results
+
+plot(2:k.max, within_sum_squares, 
+     type="b", pch = 15, frame = FALSE, 
+     xlab="Number of clusters K", 
+     ylab="Total within-clusters sum of squares") 
+     abline(v = 4, lty =2) + theme_tufte() 
+
+set.seed(1)
+kmeans_model <- kmeans(train_df_geo, centers = 10, nstart = 25)
+
+train_df_FE2 <- train_df
+train_df_FE2$location <- as.factor(kmeans_model$cluster)
+train_df_FE2$zipcode <- NULL
+
+df_prep_F2 <- cbind(fix_scale(train_df_FE2, ordinal_variables),
+                 dummy_encode(train_df_FE2),
+                 train_df_FE2[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F2, formula = formula, target_variable = target_variable)
+# And it's getting worse, even with 10 location clusters, which would
+# here be clustering 10 neighbourhoods by proximity... :s
+
+# Third Step: Create a new feature for house age in years. 
+
+train_df_age <- house_age_variable(train_df)
+
+# This is a numeric feature, which will have to be scaled and fixed for skewness. 
+
+df_prep_F3 <- cbind(fix_scale(train_df_age, ordinal_variables),
+                 dummy_encode(train_df_age),
+                 train_df_age[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F3, formula = formula, target_variable = target_variable)
+# Slight improvement!
+# The improvement is hardly significant, though. 
+
+# Fourth step: Establish if the house has been renovated. 
+
+train_df_reno <- reno_variable(train_df)
+
+df_prep_F4 <- cbind(fix_scale(train_df_reno, ordinal_variables),
+                 dummy_encode(train_df_reno),
+                 train_df_reno[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F4, formula = formula, target_variable = target_variable)
+# Slightly worse, not significantly.
+
+# Fifth step: Working with our basement space 
+
+train_df_space <- basement_var(train_df)
+
+df_prep_F5 <- cbind(fix_scale(train_df_space, ordinal_variables),
+                 dummy_encode(train_df_space),
+                 train_df_space[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F5, formula = formula, target_variable = target_variable)
+# Slightly worse, again not significantly. 
+
+# Sixth step: Compare the house's living space to the rest of the neighbourhood.
+
+train_df_neighbour <- neighbour_var(train_df)
+
+df_prep_F6 <- cbind(fix_scale(train_df_neighbour, ordinal_variables),
+                 dummy_encode(train_df_neighbour),
+                 train_df_neighbour[ ,ordinal_variables],
+                 target_variable)
+
+eval_against_baseline(df_prep_F6, formula = formula, target_variable = target_variable)
+# Slightly better, will keep this feature for further steps.
+
+# Feature Selection
+# Starting with df_prep
+
+whole_data <- f_partition(df_prep,
+                              test_proportion = 0.2,
+                              seed = 1)
+
+ctrl <- rfeControl(functions = caretFuncs,
+                   method = "repeatedcv",
+                   repeats = 1,
+                   verbose = FALSE)
+
+subsets <- c(25, 50, 75, 100)
+
+# caretProfile <- rfe(x = as.data.frame(dplyr::select(whole_data$train, -c('target_variable'))), 
+#                  y = whole_data$train$target_variable,
+#                  sizes = subsets,
+#                  rfeControl = ctrl)
+
+# caretProfile
+# Computationally expensive, marginal benefits involved; 0.1364 for 
+
+```
+
+## Model Selection
+
+The following models were attempted for all the aforementioned feature engineering processes. The algorithms are: Basix R partitioning tree, random forest, gradient boosting tree, a regression with stepwise feature selection, regression with regularization, and boosting regression. 
+
+Both stepwise and regularization regressions aim at reducing the number of features to strictly retain the most significant ones to minimize the chances of overfitting.. The results will be displayed in the following results table. The lowest MAPE occurs for 'df_prep', which is the train data frame which has not received any feature engineering process, for the gradient boosting tree algorithm. It is fairly typical of xgboost algorithms to outperform others in prediction problems. 
+
+**The resulting MAPE on the test set is 12.10%, outperforming the baseline by 1.5 percentage points.** 
+
+```{r model_selection, echo=FALSE, results='hide'}
+
+df_prep_list <- list(df_prep, df_prep_F1, df_prep_F2, df_prep_F3,
+                     df_prep_F4, df_prep_F5, df_prep_F6)
+# Partitioning Tree
+
+# Random Forest
+
+# Boosting Tree
+
+# Regression with StepWise feature selection 
+
+# Regression with regularization 
+
+# Boosting Regression
+
+# Results Table
+
+set.seed(1)
+
+results_table <- rbind(run_part_tree(df_prep_list),
+                 run_rf(df_prep_list),
+                 run_bt(df_prep_list),
+                 run_swr(df_prep_list),
+                 run_reg(df_prep_list),
+                 run_xgbr(df_prep_list)
+)
+
+colnames(results_table) <- c('df_prep', 'df_prep_F1', 'df_prep_F2', 'df_prep_F3',
+                     'df_prep_F4', 'df_prep_F5', 'df_prep_F6')
+
+rownames(results_table) <- c('partition_tree','rand_for','boost_tree',
+                          'sw_reg','reg_reg', 'boost_reg')
+
+```
+
+
+```{r results, echo = FALSE}
+
+results_table
+
+# Compared to baselin of 0.136493, we have improved :)
+
+```
+
+
+# Cross-Validation
+
+The next step involves cross-validating our model, in order to ensure it is resilient to different and will not behave erratically when presented with other datasets. With the same hyperparameter for the xgboost algorith, i.e. 200 trees, the model was cross-validated with 10 folds. 
+
+In the following graph, the user can perceive that as the number of iterations increases to 200, the mean absolute error decreases progressively across the 10 folds. For the 200th iteration, the mean absolute error reaches USD 67,647.99, compared to an average listing price of USD 539,805. This implies an an average percentage error of 12.5, consistent with the results found in the model selection phase. 
+
+```{r cross_validation, echo = FALSE, results="hide"}
+
+set.seed(1)
+
+whole_data<-f_partition(df_prep,
+                        test_proportion = 0.2,
+                        seed = 1)
+
+params <- list(
+  booster = "gbtree", 
+  objective = "reg:linear"
+  )
+
+cv <- xgb.cv(params = params,
+             data = data.matrix(dplyr::select(whole_data$train, -c('target_variable'))), 
+             label = exp(whole_data$train$target_variable),
+             nrounds = 200, 
+             nfold = 10, 
+             metrics = list("mae"))
+
+cv_data <- as.data.frame(cv$evaluation_log)[ , c('iter','train_mae_mean', 'test_mae_mean')]
+
+cv_data_plot <- melt(cv_data, id = 'iter')
+
+cv_plot <- ggplot(data=cv_data_plot, aes(x=iter, y=value, group=variable)) +
+            geom_line(aes(color=variable)) +
+            scale_y_continuous(limits = c(0, 400000),
+              breaks= seq(0, 400000, by=100000), labels = comma) + 
+            theme_tufte() +
+            ggtitle('MAE for Cross-Validation Results with 10 folds') +
+            labs(x = "Number of Iterations", y = 'MAE', color = 'Dataset')
+
+cv_plot
+
+```
+
+# Model Deployment
+
+Finally, after cross-validating the model, the next step is to deploy it on the test set, which does not include the 'price' variable. The same gradient boosting model with 200 trees is applied, after the same data preparation processes used for the train dataset. No feature engineering process is applied, since the best-performing model on the train set did not include any of those. 
+
+A final .csv file is written, with the 'id' of the property, and the price prediction in the 'price_pred' column. 
+
+```{r deployment, echo = FALSE, results = 'hide'}
+
+test_df
+
+factor_variables <- c('waterfront', 'view', 'condition', 'grade', 'zipcode')
+
+test_df <- cbind(get_num_columns(test_df),
+                  fix_dates(test_df)[ ,c('year', 'month', 'day')],
+                  fix_factors(test_df, factor_variables), 
+                  fix_int(test_df, factor_variables))
+
+str(test_df)
+
+test_df$waterfront <- NULL # Can't train on 1% of data!
+test_df$day <- NULL
+
+ordinal_variables <- c('bathrooms','floors','lat','long',
+                      'bedrooms','yr_built','yr_renovated',
+                      'year','month')
+
+df_prep_test <- cbind(fix_scale(test_df, ordinal_variables),
+                 dummy_encode(test_df),
+                 test_df[ ,ordinal_variables]
+                 )
+
+df_deploy <- df_prep[ , c(names(df_prep_test), 'target_variable')]
+
+boosting_tree_model<-xgboost(booster='gbtree', 
+               data = data.matrix(dplyr::select(df_deploy, -c('target_variable'))),
+               label = df_prep$target_variable, 
+               nrounds = 200,
+               objective='reg:linear')
+
+pred <- predict(boosting_tree_model, data.matrix(df_prep_test), type='response')
+
+output <- cbind(df_prep_test, pred)
+output$price <- exp(output$pred)
+
+output <- cbind(test_df_ids, output$price)
+colnames(output) <- c('id', 'price_pred')
+
+write.csv(output, 'Paul_Jacques-Mignault_Price_pred.csv', 
+          row.names=FALSE) # And voilà!
+
+```
+
+# Conclusion
+
+In conclusion, several variables do incluence Seattle's property prices, though the full dataset with more than 21,000 tuples is pulled from kaggle. This allows the present script to assess the predictions made on the test dataset against the real data pulled from kaggle. **When benchmarked against the actual house prices, the test set's MAPE is 12.46%.** This result is consistent with those obtained after fitting the model, and in the cross-validation as well. 
+
+Though both feature engineering and feature selection algorithms failed to improve over the baseline, the xgboost model outperformed other models with a limited number of trees. This is a demonstration that often times, the simplest processes and algorithms work best. 
+
+```{r conclusion, echo=FALSE}
+
+www <- 'https://raw.githubusercontent.com/paul-jm/House_Prices/master/kc_house_data.csv'
+real_df <- read.csv(www, header = TRUE, sep=",") 
+
+combined_df <- merge(x = output, y = real_df, by = 'id', all.x = TRUE)[ ,c('id',
+                                                                           'price_pred', 
+                                                                           'price')]
+
+mape(real = combined_df$price, predicted = combined_df$price_pred)  
+
+```
