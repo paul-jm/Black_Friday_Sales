@@ -26,8 +26,12 @@ packages_list <- c('data.table',
                    'mlbench',
                    'Hmisc',
                    'grid',
-                   'reshape2'
-)
+                   'reshape2',
+                   'formattable',
+                   'moments',
+                   'datetime',
+                   'DescTools'
+                   )
 
 
 for (i in packages_list){
